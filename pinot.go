@@ -1,4 +1,4 @@
-package main
+package pinot_testContainer
 
 import (
 	"context"
