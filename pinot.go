@@ -118,6 +118,70 @@ func RunPinotContainer(ctx context.Context) (*Pinot, error) {
 	}, nil
 }
 
+func RunPinotContainerLocal(ctx context.Context) (*Pinot, error) {
+
+	zkURI := "pinot-zk"
+	pinotURI := "pinot-controller"
+
+	absPath, err := filepath.Abs(filepath.Join(".", "testdata", "pinot-controller.conf"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to add data: %s", err)
+	}
+
+	_, err = testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Name:         zkURI,
+			Image:        "apachepinot/pinot:latest",
+			ExposedPorts: []string{"2181/tcp"},
+			Cmd:          []string{"StartZookeeper"},
+			WaitingFor:   wait.ForLog("Start zookeeper at localhost:2181 in thread main").WithStartupTimeout(4 * time.Minute),
+		},
+		Started: true,
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to start container: %s", err)
+	}
+
+	fmt.Println("ZK URI: ", zkURI)
+
+	pinotContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Name:         pinotURI,
+			Image:        "apachepinot/pinot:latest",
+			ExposedPorts: []string{"2123/tcp", "9000/tcp", "8000/tcp", "7050/tcp", "6000/tcp"},
+			Files: []testcontainers.ContainerFile{
+				{
+					HostFilePath:      absPath,
+					ContainerFilePath: "/config/pinot-controller.conf",
+					FileMode:          0o700,
+				},
+			},
+			Cmd:        []string{"StartController", "-configFileName", "/config/pinot-controller.conf"},
+			WaitingFor: wait.ForLog("INFO [StartServiceManagerCommand] [main] Started Pinot [CONTROLLER] instance").WithStartupTimeout(4 * time.Minute),
+		},
+		Started: true,
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to start container: %s", err)
+	}
+
+	tearDown := func() {
+		if err := pinotContainer.Terminate(ctx); err != nil {
+			log.Panicf("failed to terminate container: %s", err)
+		}
+	}
+
+	pinotControllerURI := "localhost:9000"
+
+	return &Pinot{
+		Container: pinotContainer,
+		TearDown:  tearDown,
+		URI:       pinotControllerURI,
+	}, nil
+}
+
 func (p *Pinot) CreateUser(_ context.Context, userBytes []byte) (*model.UserActionResponse, error) {
 	client := goPinotAPI.NewPinotAPIClient(
 		goPinotAPI.ControllerUrl("http://"+p.URI),
