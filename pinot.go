@@ -30,6 +30,106 @@ func randomisePinotURI(uri string) string {
 	return fmt.Sprintf("%s-%s", uri, randomShortUUID())
 }
 
+func withFiles(filePaths ...string) ([]testcontainers.ContainerFile, error) {
+	var files []testcontainers.ContainerFile
+	for _, filePath := range filePaths {
+		absPath, err := filepath.Abs(filepath.Join(".", "testdata", filePath))
+		if err != nil {
+			return nil, fmt.Errorf("failed to add data: %s", err)
+		}
+		files = append(files, testcontainers.ContainerFile{
+			HostFilePath:      absPath,
+			ContainerFilePath: "/config/" + filePath,
+			FileMode:          0o700,
+		})
+	}
+	return files, nil
+}
+
+func RunPinotContainerWithFiles(ctx context.Context, filePaths ...string) (*Pinot, error) {
+
+	// Pinot Container with Files, allows you to give multiple files to the container to mount in the container.
+
+	zkURI := randomisePinotURI("pinot-zk")
+	pinotURI := randomisePinotURI("pinot-controller")
+
+	files, err := withFiles(filePaths...)
+	if err != nil {
+		return nil, err
+	}
+	newNetwork, err := network.New(ctx, network.WithCheckDuplicate())
+	if err != nil {
+		return nil, fmt.Errorf("failed to create network: %s", err)
+	}
+
+	networkName := newNetwork.Name
+
+	_, err = testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Networks: []string{networkName},
+			NetworkAliases: map[string][]string{
+				networkName: {"pinot-zk"},
+			},
+			Name:         zkURI,
+			Image:        "apachepinot/pinot:latest",
+			ExposedPorts: []string{"2181/tcp"},
+			Cmd:          []string{"StartZookeeper"},
+			WaitingFor:   wait.ForLog("Start zookeeper at localhost:2181 in thread main").WithStartupTimeout(4 * time.Minute),
+		},
+		Started: true,
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to start container: %s", err)
+	}
+
+	fmt.Println("ZK URI: ", zkURI)
+
+	pinotContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Networks: []string{networkName},
+			NetworkAliases: map[string][]string{
+				networkName: {"pinot-controller"}, // this does work btw
+			},
+			Name:         pinotURI,
+			Image:        "apachepinot/pinot:latest",
+			ExposedPorts: []string{"2123/tcp", "9000/tcp", "8000/tcp", "7050/tcp", "6000/tcp"},
+			Files:        files,
+			Cmd:          []string{"StartController", "-configFileName", "/config/pinot-controller.conf"}, //"StartController"  "-configFileName", "/config/pinot-controller.conf"
+			WaitingFor:   wait.ForLog("INFO [StartServiceManagerCommand] [main] Started Pinot [CONTROLLER] instance").WithStartupTimeout(4 * time.Minute),
+		},
+		Started: true,
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to start container: %s", err)
+	}
+
+	tearDown := func() {
+		if err := pinotContainer.Terminate(ctx); err != nil {
+			log.Panicf("failed to terminate container: %s", err)
+		}
+	}
+
+	pinotControllerMappedPort, err := pinotContainer.MappedPort(ctx, "9000")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get mapped port: %s", err)
+	}
+
+	pinotContainerHost, err := pinotContainer.Host(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get container host: %s", err)
+	}
+
+	pinotControllerURI := fmt.Sprintf("%s:%v", pinotContainerHost, pinotControllerMappedPort.Port())
+
+	return &Pinot{
+		Container: pinotContainer,
+		TearDown:  tearDown,
+		URI:       pinotControllerURI,
+	}, nil
+}
+
 func RunPinotContainer(ctx context.Context) (*Pinot, error) {
 
 	zkURI := randomisePinotURI("pinot-zk")
